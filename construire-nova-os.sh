@@ -16,6 +16,14 @@ exec > >(tee "$HERE/construction.log") 2>&1
 trap 'echo "ÉCHEC à la ligne $LINENO : $BASH_COMMAND"' ERR
 
 echo "== Outils de construction"
+# dépôts Debian complets (dont non-free-firmware) pour vérifier quels paquets existent
+cat > /etc/apt/sources.list.d/nova-complet.sources <<'EOF'
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: trixie trixie-updates
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
 apt-get update
 apt-get install -y live-build debootstrap unzip ca-certificates
 
@@ -24,6 +32,11 @@ mkdir -p "$WORK"
 cd "$WORK"
 
 echo "== Configuration de l'image"
+# zstd : le système se décompresse beaucoup plus vite au démarrage que le xz par défaut
+ZSTD=()
+if lb config --help 2>&1 | grep -q -- "--chroot-squashfs-compression-type"; then
+  ZSTD=(--chroot-squashfs-compression-type zstd --chroot-squashfs-compression-level 6)
+fi
 lb config \
   --distribution trixie \
   --archive-areas "main contrib non-free non-free-firmware" \
@@ -32,62 +45,45 @@ lb config \
   --debian-installer none \
   --memtest none \
   --apt-recommends false \
+  --firmware-chroot true \
   --iso-application "Nova OS" \
   --iso-publisher "Nova" \
   --iso-volume "NOVA_OS" \
-  --bootappend-live "boot=live components quiet splash persistence username=nova user-fullname=Nova hostname=nova locales=fr_FR.UTF-8 keyboard-layouts=fr timezone=Europe/Paris"
+  "${ZSTD[@]}" \
+  --bootappend-live "boot=live components quiet splash loglevel=3 noeject noprompt persistence user-default-groups=audio,video,plugdev,netdev,bluetooth,dialout,sudo,input,render username=nova user-fullname=Nova hostname=nova locales=fr_FR.UTF-8 keyboard-layouts=fr timezone=Europe/Paris"
 
 # ---------- paquets ----------
-cat > config/package-lists/nova.list.chroot <<'EOF'
-live-boot
-live-config
-live-config-systemd
-user-setup
-sudo
-systemd-sysv
-locales
-tzdata
-keyboard-configuration
-console-setup
-ca-certificates
-curl
-unzip
-zstd
-dbus-x11
-xserver-xorg
-xserver-xorg-video-all
-xserver-xorg-input-all
-xinit
-x11-xserver-utils
-lightdm
-xfce4
-xfce4-terminal
-thunar
-mousepad
-network-manager
-network-manager-gnome
-pipewire
-pipewire-pulse
-pipewire-alsa
-wireplumber
-pulseaudio-utils
-alsa-utils
-chromium
-chromium-l10n
-fonts-dejavu-core
-zenity
-plymouth
-plymouth-themes
-nodejs
-npm
-can-utils
-firmware-linux-free
-firmware-misc-nonfree
-firmware-iwlwifi
-firmware-realtek
-firmware-atheros
-firmware-brcm80211
-EOF
+# Sans les « recommandés », il faut citer tout ce qui compte : pilotes graphiques (sinon tout est
+# dessiné par le processeur et ça rame), wpasupplicant (sinon pas de Wi-Fi), Bluetooth, téléphone.
+PKGS="
+live-boot live-config live-config-systemd user-setup sudo systemd-sysv dbus dbus-user-session dbus-x11
+locales tzdata keyboard-configuration console-setup ca-certificates curl unzip zstd pciutils usbutils
+xserver-xorg xserver-xorg-core xserver-xorg-video-all xserver-xorg-input-all xserver-xorg-input-libinput
+xinit x11-xserver-utils x11-utils xdotool unclutter
+libgl1-mesa-dri libglx-mesa0 libegl-mesa0 libgbm1 mesa-vulkan-drivers mesa-va-drivers mesa-vdpau-drivers
+va-driver-all intel-media-va-driver-non-free i965-va-driver
+lightdm xfce4 xfwm4 xfce4-terminal thunar mousepad
+network-manager network-manager-gnome wpasupplicant iw wireless-regdb rfkill iproute2 modemmanager usb-modeswitch
+bluez bluez-obexd libspa-0.2-bluetooth
+pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils alsa-utils alsa-ucm-conf firmware-sof-signed
+playerctl kdeconnect adb scrcpy
+chromium chromium-l10n chromium-sandbox fonts-dejavu-core fonts-noto-color-emoji
+zenity plymouth plymouth-themes
+nodejs npm can-utils
+intel-microcode amd64-microcode
+firmware-linux-free firmware-misc-nonfree firmware-linux-nonfree
+firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211 firmware-libertas firmware-mediatek
+firmware-ti-connectivity firmware-intel-sound firmware-intel-graphics firmware-intel-misc
+firmware-amd-graphics firmware-nvidia-graphics firmware-bnx2 firmware-bnx2x firmware-netronome
+firmware-qlogic firmware-cavium firmware-myricom firmware-netxen firmware-qcom-soc
+polkitd
+"
+OK=(); MANQUE=()
+for p in $PKGS; do
+  if apt-cache show "$p" >/dev/null 2>&1; then OK+=("$p"); else MANQUE+=("$p"); fi
+done
+printf '%s\n' "${OK[@]}" > config/package-lists/nova.list.chroot
+echo "Paquets retenus : ${#OK[@]}. Absents de Debian 13, ignorés : ${MANQUE[*]:-aucun}"
 
 # ---------- fichiers de Nova OS ----------
 INC=config/includes.chroot
@@ -131,6 +127,50 @@ SUBSYSTEM=="tty", KERNEL=="ttyACM[0-9]*", MODE="0666"
 ACTION=="add", SUBSYSTEM=="usb-serial", DRIVER=="ftdi_sio", ATTR{latency_timer}="1"
 EOF
 
+# Extinction : la clé USB ne doit pas être détachée avant la toute fin, sinon le système ne peut
+# plus lire le programme qui coupe le courant et reste bloqué (« Failed to execute shutdown binary »).
+mkdir -p "$INC/usr/local/sbin" "$INC/etc/systemd/system/multi-user.target.wants"
+cat > "$INC/usr/local/sbin/nova-garder-cle" <<'EOF'
+#!/bin/sh
+# pour chaque montage de la clé live (/run/live/...), systemd ne le démonte plus à l'arrêt
+findmnt -rn -o TARGET | grep '^/run/live' | while read -r m; do
+  u="$(systemd-escape --path --suffix=mount "$m")"
+  mkdir -p "/run/systemd/system/$u.d"
+  printf '[Unit]\nDefaultDependencies=no\n' > "/run/systemd/system/$u.d/90-nova.conf"
+done
+systemctl daemon-reload
+EOF
+chmod +x "$INC/usr/local/sbin/nova-garder-cle"
+cat > "$INC/etc/systemd/system/nova-garder-cle.service" <<'EOF'
+[Unit]
+Description=Nova OS : garder la clé montée jusqu'à l'extinction
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nova-garder-cle
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+ln -sf /etc/systemd/system/nova-garder-cle.service "$INC/etc/systemd/system/multi-user.target.wants/nova-garder-cle.service"
+
+# Nova pilote elle-même le Wi-Fi, le Bluetooth, l'écran et l'extinction, sans mot de passe
+mkdir -p "$INC/etc/polkit-1/rules.d" "$INC/etc/NetworkManager/conf.d"
+cat > "$INC/etc/polkit-1/rules.d/50-nova.rules" <<'EOF'
+polkit.addRule(function (action, subject) {
+  if (subject.user == "nova") return polkit.Result.YES;
+});
+EOF
+cat > "$INC/etc/NetworkManager/conf.d/90-nova.conf" <<'EOF'
+[main]
+plugins=keyfile
+[device]
+wifi.scan-rand-mac-address=no
+[ifupdown]
+managed=true
+EOF
 cat > "$INC/etc/skel/Desktop/Nova.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
@@ -173,6 +213,14 @@ plymouth-set-default-theme nova || ln -sf /usr/share/plymouth/themes/nova/nova.p
 update-initramfs -u -k all
 # brltty s'empare des câbles CH340 : on s'assure qu'il n'est pas là
 apt-get remove -y brltty 2>/dev/null || true
+# démarrage plus rapide : on n'attend pas le réseau, ni les services inutiles en voiture
+systemctl mask NetworkManager-wait-online.service systemd-networkd-wait-online.service 2>/dev/null || true
+systemctl disable apt-daily.timer apt-daily-upgrade.timer man-db.timer e2scrub_all.timer 2>/dev/null || true
+systemctl enable bluetooth.service NetworkManager.service 2>/dev/null || true
+# Bluetooth allumé au démarrage, visible sous le nom « Nova »
+if [ -f /etc/bluetooth/main.conf ]; then
+  sed -i -E 's/^#? *AutoEnable *=.*/AutoEnable=true/; s/^#? *Name *=.*/Name = Nova/; s/^#? *FastConnectable *=.*/FastConnectable = true/' /etc/bluetooth/main.conf
+fi
 EOF
 chmod +x config/hooks/normal/0500-nova.hook.chroot
 
