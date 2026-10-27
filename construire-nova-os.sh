@@ -11,6 +11,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="${WORK:-/tmp/nova-os-build}"
 OUT="${OUT:-$HERE/nova-os.iso}"
 [ "$(id -u)" = "0" ] || { echo "À lancer en administrateur (sudo)."; exit 1; }
+# tout est noté dans construction.log, dès la première ligne
+exec > >(tee "$HERE/construction.log") 2>&1
+trap 'echo "ÉCHEC à la ligne $LINENO : $BASH_COMMAND"' ERR
 
 echo "== Outils de construction"
 apt-get update
@@ -94,8 +97,13 @@ mkdir -p "$INC/opt" "$INC/usr/share/plymouth/themes/nova" "$INC/usr/share/xsessi
 unzip -q "$HERE/nova-auto.zip" -d "$INC/opt"
 mv "$INC/opt/nova-auto" "$INC/opt/nova"
 rm -rf "$INC/opt/nova/node_modules"
-cp "$HERE"/nova-os/plymouth/* "$INC/usr/share/plymouth/themes/nova/"
-cp "$HERE/nova-os/fond-nova.png" "$INC/usr/share/backgrounds/nova/fond-nova.png"
+# les fichiers peuvent être rangés dans nova-os/ ou posés à plat à côté du script (envoi par le site GitHub)
+asset() {
+  for p in "$HERE/nova-os/plymouth/$1" "$HERE/nova-os/$1" "$HERE/$1"; do [ -f "$p" ] && { echo "$p"; return; }; done
+  echo "Fichier manquant : $1" >&2; exit 1
+}
+for f in nova.plymouth nova.script logo.png glow.png; do cp "$(asset "$f")" "$INC/usr/share/plymouth/themes/nova/"; done
+cp "$(asset fond-nova.png)" "$INC/usr/share/backgrounds/nova/fond-nova.png"
 printf '[Daemon]\nTheme=nova\n' > "$INC/etc/plymouth/plymouthd.conf"
 
 cat > "$INC/usr/share/xsessions/nova.desktop" <<'EOF'
@@ -171,8 +179,9 @@ chmod +x config/hooks/normal/0500-nova.hook.chroot
 # ---------- menu de démarrage : « Nova OS », sans attente ----------
 if [ -d /usr/share/live/build/bootloaders ]; then
   cp -r /usr/share/live/build/bootloaders config/
-  grep -rl "Live system" config/bootloaders | xargs -r sed -i 's/Live system/Nova OS/g'
-  grep -rl "Debian GNU/Linux" config/bootloaders | xargs -r sed -i 's#Debian GNU/Linux#Nova OS#g'
+  # (grep ne trouve parfois rien : ce n'est pas une erreur)
+  { grep -rl "Live system" config/bootloaders || true; } | xargs -r sed -i 's/Live system/Nova OS/g'
+  { grep -rl "Debian GNU/Linux" config/bootloaders || true; } | xargs -r sed -i 's#Debian GNU/Linux#Nova OS#g'
   for f in config/bootloaders/isolinux/isolinux.cfg config/bootloaders/syslinux/syslinux.cfg; do
     [ -f "$f" ] || continue
     if grep -q "^timeout" "$f"; then sed -i 's/^timeout.*/timeout 20/' "$f"; else echo "timeout 20" >> "$f"; fi
@@ -184,9 +193,9 @@ if [ -d /usr/share/live/build/bootloaders ]; then
 fi
 
 echo "== Construction (20 à 40 minutes)"
-lb build 2>&1 | tee "$HERE/construction.log"
+lb build
 
-ISO="$(ls -1 "$WORK"/*.iso 2>/dev/null | head -1)"
+ISO="$(ls -1 "$WORK"/*.iso 2>/dev/null | head -1 || true)"
 [ -n "$ISO" ] || { echo "Échec : pas d'image produite (voir construction.log)"; exit 1; }
 mv "$ISO" "$OUT"
 ls -lh "$OUT"
