@@ -1,0 +1,51 @@
+# Nova OS : fond acier sombre, le logo TT apparaît puis respire avec sa lueur néon.
+Window.SetBackgroundTopColor(0.13, 0.14, 0.16);
+Window.SetBackgroundBottomColor(0.03, 0.03, 0.04);
+
+sw = Window.GetWidth();
+sh = Window.GetHeight();
+
+logo_raw = Image("logo.png");
+glow_raw = Image("glow.png");
+w = sw * 0.36;
+h = w * logo_raw.GetHeight() / logo_raw.GetWidth();
+logo = logo_raw.Scale(w, h);
+# la lueur a une marge : 1000/840 en largeur, 632/472 en hauteur
+gw = w * 1000 / 840;
+gh = h * 632 / 472;
+glow = glow_raw.Scale(gw, gh);
+
+glow_sprite = Sprite(glow);
+glow_sprite.SetX(sw / 2 - gw / 2);
+glow_sprite.SetY(sh * 0.44 - gh / 2);
+glow_sprite.SetZ(1);
+glow_sprite.SetOpacity(0);
+
+logo_sprite = Sprite(logo);
+logo_sprite.SetX(sw / 2 - w / 2);
+logo_sprite.SetY(sh * 0.44 - h / 2);
+logo_sprite.SetZ(2);
+logo_sprite.SetOpacity(0);
+
+t = 0;
+fun refresh_callback() {
+  t++;
+  # apparition sur ~1,5 s puis respiration lente
+  a = t / 75;
+  if (a > 1) a = 1;
+  logo_sprite.SetOpacity(a);
+  p = (Math.Sin(t / 40) + 1) / 2;
+  glow_sprite.SetOpacity(a * (0.15 + 0.55 * p));
+}
+Plymouth.SetRefreshFunction(refresh_callback);
+
+# messages (vérification de disque, etc.) en bas, discrets
+msg_sprite = Sprite();
+msg_sprite.SetZ(3);
+fun message_callback(text) {
+  img = Image.Text(text, 0.7, 0.72, 0.76);
+  msg_sprite.SetImage(img);
+  msg_sprite.SetX(sw / 2 - img.GetWidth() / 2);
+  msg_sprite.SetY(sh * 0.9);
+}
+Plymouth.SetMessageFunction(message_callback);

@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Nova
+Description=Démarrage de Nova OS : le logo TT s'allume
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/nova
+ScriptFile=/usr/share/plymouth/themes/nova/nova.script
