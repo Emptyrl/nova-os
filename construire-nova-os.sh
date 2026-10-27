@@ -244,6 +244,12 @@ lb build
 
 ISO="$(ls -1 "$WORK"/*.iso 2>/dev/null | head -1 || true)"
 [ -n "$ISO" ] || { echo "Échec : pas d'image produite (voir construction.log)"; exit 1; }
+# l'image fait plus de 2 Go : on libère d'abord la place prise par la construction
+# (le système de travail, les caches) avant de la déplacer, sinon le disque est plein
+echo "== Rangement de l'image ($(du -h "$ISO" | cut -f1))"
+rm -rf "$WORK/chroot" "$WORK/binary" "$WORK/cache" "$WORK/.build" 2>/dev/null || true
+apt-get clean
+df -h "$WORK" "$(dirname "$OUT")" || true
 mv "$ISO" "$OUT"
 ls -lh "$OUT"
 echo "Nova OS est prêt : $OUT"
