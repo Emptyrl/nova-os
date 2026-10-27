@@ -17,13 +17,12 @@ trap 'echo "ÉCHEC à la ligne $LINENO : $BASH_COMMAND"' ERR
 
 echo "== Outils de construction"
 # dépôts Debian complets (dont non-free-firmware) pour vérifier quels paquets existent
-cat > /etc/apt/sources.list.d/nova-complet.sources <<'EOF'
-Types: deb
-URIs: http://deb.debian.org/debian
-Suites: trixie trixie-updates
-Components: main contrib non-free non-free-firmware
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
-EOF
+# on complète les dépôts déjà configurés au lieu d'en ajouter un second (apt refuse les doublons)
+rm -f /etc/apt/sources.list.d/nova-complet.sources
+for f in /etc/apt/sources.list.d/*.sources; do
+  if [ -f "$f" ]; then sed -i -E 's/^Components:.*/Components: main contrib non-free non-free-firmware/' "$f"; fi
+done
+if [ -f /etc/apt/sources.list ]; then sed -i -E '/^deb /{/non-free-firmware/!s/ main( |$)/ main contrib non-free non-free-firmware\1/}' /etc/apt/sources.list; fi
 apt-get update
 apt-get install -y live-build debootstrap unzip ca-certificates
 
