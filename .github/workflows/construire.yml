@@ -1,1 +1,36 @@
+name: Construire Nova OS
 
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  iso:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container:
+      image: debian:trixie
+      options: --privileged
+    steps:
+      - name: Récupérer les fichiers
+        uses: actions/checkout@v4
+
+      - name: Construire l'image
+        run: bash construire-nova-os.sh
+
+      - name: Publier nova-os.iso
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nova-os-${{ github.run_number }}
+          name: Nova OS (construction ${{ github.run_number }})
+          body: Image de Nova OS à écrire sur une clé USB avec Rufus.
+          files: nova-os.iso
+
+      - name: Garder le journal en cas d'échec
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: journal-construction
+          path: construction.log
