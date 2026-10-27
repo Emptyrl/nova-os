@@ -25,8 +25,11 @@ jobs:
         with:
           tag_name: nova-os-${{ github.run_number }}
           name: Nova OS (construction ${{ github.run_number }})
-          body: Image de Nova OS à écrire sur une clé USB avec Rufus.
-          files: nova-os.iso
+          body: Image de Nova OS à écrire sur une clé USB avec Rufus (voir LISEZMOI). Si l'image est en morceaux, télécharge-les tous avec recoller-nova-os.bat dans le même dossier et double-clique sur le .bat.
+          files: |
+            nova-os.iso
+            nova-os.iso.morceau*
+            recoller-nova-os.bat
 
       - name: Garder le journal en cas d'échec
         if: failure()
