@@ -94,13 +94,8 @@ mkdir -p "$INC/opt" "$INC/usr/share/plymouth/themes/nova" "$INC/usr/share/xsessi
 unzip -q "$HERE/nova-auto.zip" -d "$INC/opt"
 mv "$INC/opt/nova-auto" "$INC/opt/nova"
 rm -rf "$INC/opt/nova/node_modules"
-# les fichiers peuvent être rangés dans nova-os/ ou posés à plat à côté du script (envoi par le site GitHub)
-asset() {
-  for p in "$HERE/nova-os/plymouth/$1" "$HERE/nova-os/$1" "$HERE/$1"; do [ -f "$p" ] && { echo "$p"; return; }; done
-  echo "Fichier manquant : $1" >&2; exit 1
-}
-for f in nova.plymouth nova.script logo.png glow.png; do cp "$(asset "$f")" "$INC/usr/share/plymouth/themes/nova/"; done
-cp "$(asset fond-nova.png)" "$INC/usr/share/backgrounds/nova/fond-nova.png"
+cp "$HERE"/nova-os/plymouth/* "$INC/usr/share/plymouth/themes/nova/"
+cp "$HERE/nova-os/fond-nova.png" "$INC/usr/share/backgrounds/nova/fond-nova.png"
 printf '[Daemon]\nTheme=nova\n' > "$INC/etc/plymouth/plymouthd.conf"
 
 cat > "$INC/usr/share/xsessions/nova.desktop" <<'EOF'
