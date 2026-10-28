@@ -34,7 +34,7 @@ echo "== Configuration de l'image"
 # zstd : le système se décompresse beaucoup plus vite au démarrage que le xz par défaut
 ZSTD=()
 if lb config --help 2>&1 | grep -q -- "--chroot-squashfs-compression-type"; then
-  ZSTD=(--chroot-squashfs-compression-type zstd --chroot-squashfs-compression-level 19)
+  ZSTD=(--chroot-squashfs-compression-type zstd --chroot-squashfs-compression-level 15)
 fi
 lb config \
   --distribution trixie \
@@ -48,7 +48,7 @@ lb config \
   --iso-publisher "Nova" \
   --iso-volume "NOVA_OS" \
   "${ZSTD[@]}" \
-  --bootappend-live "boot=live components quiet splash loglevel=3 noeject noprompt persistence user-default-groups=audio,video,plugdev,netdev,bluetooth,dialout,sudo,input,render username=nova user-fullname=Nova hostname=nova locales=fr_FR.UTF-8 keyboard-layouts=fr timezone=Europe/Paris"
+  --bootappend-live "boot=live components quiet splash loglevel=3 noeject noprompt persistence user-default-groups=audio,video,plugdev,netdev,bluetooth,dialout,sudo,input,render,adm,systemd-journal username=nova user-fullname=Nova hostname=nova locales=fr_FR.UTF-8 keyboard-layouts=fr timezone=Europe/Paris"
 
 # ---------- paquets ----------
 # Sans les « recommandés », il faut citer tout ce qui compte : pilotes graphiques (sinon tout est
@@ -61,12 +61,12 @@ xinit x11-xserver-utils x11-utils xdotool unclutter
 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 libgbm1 mesa-vulkan-drivers mesa-va-drivers mesa-vdpau-drivers
 va-driver-all intel-media-va-driver-non-free i965-va-driver
 lightdm xfce4 xfwm4 xfce4-terminal thunar mousepad
-network-manager network-manager-gnome wpasupplicant iw wireless-regdb rfkill iproute2 modemmanager usb-modeswitch
+network-manager network-manager-gnome wpasupplicant iw wireless-regdb rfkill iproute2 usb-modeswitch
 bluez bluez-obexd libspa-0.2-bluetooth
 pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils alsa-utils alsa-ucm-conf firmware-sof-signed
 playerctl kdeconnect adb scrcpy
 chromium chromium-l10n chromium-sandbox fonts-dejavu-core fonts-noto-color-emoji
-zenity plymouth plymouth-themes
+zenity plymouth plymouth-themes mesa-utils systemd-zram-generator
 nodejs npm can-utils
 intel-microcode amd64-microcode
 firmware-linux-free firmware-misc-nonfree firmware-linux-nonfree
@@ -123,7 +123,30 @@ SUBSYSTEM=="tty", KERNEL=="ttyUSB[0-9]*", MODE="0666"
 SUBSYSTEM=="tty", KERNEL=="ttyACM[0-9]*", MODE="0666"
 # FTDI : latence 1 ms, indispensable au dialogue octet par octet de la ligne K
 ACTION=="add", SUBSYSTEM=="usb-serial", DRIVER=="ftdi_sio", ATTR{latency_timer}="1"
+# aucun gestionnaire de modem ne doit toucher aux câbles de diagnostic
+SUBSYSTEM=="tty", KERNEL=="ttyUSB[0-9]*", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="tty", KERNEL=="ttyACM[0-9]*", ENV{ID_MM_DEVICE_IGNORE}="1"
 EOF
+
+# mémoire compressée (zram) : évite que tout rame quand la mémoire est pleine
+mkdir -p "$INC/etc/systemd"
+cat > "$INC/etc/systemd/zram-generator.conf" <<'EOF'
+[zram0]
+zram-size = ram / 2
+compression-algorithm = zstd
+EOF
+# journal du système gardé d'un démarrage à l'autre (pour comprendre les plantages)
+mkdir -p "$INC/var/log/journal" "$INC/etc/systemd/journald.conf.d" "$INC/etc/sudoers.d"
+cat > "$INC/etc/systemd/journald.conf.d/90-nova.conf" <<'EOF'
+[Journal]
+Storage=persistent
+SystemMaxUse=150M
+EOF
+# Nova règle l'affichage et exporte ses journaux sur la clé sans mot de passe
+cat > "$INC/etc/sudoers.d/90-nova" <<'EOF'
+nova ALL=(ALL) NOPASSWD: ALL
+EOF
+chmod 440 "$INC/etc/sudoers.d/90-nova"
 
 # Extinction : la clé USB ne doit pas être détachée avant la toute fin, sinon le système ne peut
 # plus lire le programme qui coupe le courant et reste bloqué (« Failed to execute shutdown binary »).
