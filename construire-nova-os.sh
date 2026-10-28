@@ -66,7 +66,7 @@ bluez bluez-obexd libspa-0.2-bluetooth
 pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils alsa-utils alsa-ucm-conf firmware-sof-signed
 playerctl kdeconnect adb scrcpy
 chromium chromium-l10n chromium-sandbox fonts-dejavu-core fonts-noto-color-emoji
-zenity plymouth plymouth-themes mesa-utils systemd-zram-generator
+zenity plymouth plymouth-themes mesa-utils systemd-zram-generator e2fsprogs dosfstools b43-fwcutter wget bzip2
 nodejs npm can-utils
 intel-microcode amd64-microcode
 firmware-linux-free firmware-misc-nonfree firmware-linux-nonfree
@@ -234,6 +234,19 @@ plymouth-set-default-theme nova || ln -sf /usr/share/plymouth/themes/nova/nova.p
 update-initramfs -u -k all
 # brltty s'empare des câbles CH340 : on s'assure qu'il n'est pas là
 apt-get remove -y brltty 2>/dev/null || true
+# Wi-Fi Broadcom anciens (BCM43xx, pilote b43, ex. Dell Wireless 1397 / BCM4312) : leur microprogramme
+# n'est pas dans Debian, on l'extrait du pilote Broadcom d'origine (si le téléchargement échoue, on continue)
+if command -v b43-fwcutter >/dev/null; then
+  ( cd /tmp && wget -q --tries=3 --timeout=30 -O wl.tar.bz2 https://www.lwfinger.com/b43-firmware/broadcom-wl-5.100.138.tar.bz2 \
+    && tar xjf wl.tar.bz2 && b43-fwcutter -w /lib/firmware broadcom-wl-5.100.138/linux/wl_apsta.o \
+    && echo "b43 : microprogramme installé" ) || echo "b43 : microprogramme non installé"
+  rm -rf /tmp/wl.tar.bz2 /tmp/broadcom-wl-5.100.138
+fi
+# langue française déjà prête (live-config n'a plus à la générer à chaque démarrage)
+sed -i 's/^# *fr_FR.UTF-8 UTF-8/fr_FR.UTF-8 UTF-8/' /etc/locale.gen 2>/dev/null || true
+locale-gen 2>/dev/null || true
+printf 'LANG=fr_FR.UTF-8\n' > /etc/default/locale
+ldconfig
 # démarrage plus rapide : on n'attend pas le réseau, ni les services inutiles en voiture
 systemctl mask NetworkManager-wait-online.service systemd-networkd-wait-online.service 2>/dev/null || true
 systemctl disable apt-daily.timer apt-daily-upgrade.timer man-db.timer e2scrub_all.timer 2>/dev/null || true
