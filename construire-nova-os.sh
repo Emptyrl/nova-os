@@ -34,7 +34,7 @@ echo "== Configuration de l'image"
 # zstd : le système se décompresse beaucoup plus vite au démarrage que le xz par défaut
 ZSTD=()
 if lb config --help 2>&1 | grep -q -- "--chroot-squashfs-compression-type"; then
-  ZSTD=(--chroot-squashfs-compression-type zstd --chroot-squashfs-compression-level 6)
+  ZSTD=(--chroot-squashfs-compression-type zstd --chroot-squashfs-compression-level 19)
 fi
 lb config \
   --distribution trixie \
@@ -44,7 +44,6 @@ lb config \
   --debian-installer none \
   --memtest none \
   --apt-recommends false \
-  --firmware-chroot true \
   --iso-application "Nova OS" \
   --iso-publisher "Nova" \
   --iso-volume "NOVA_OS" \
@@ -252,4 +251,15 @@ apt-get clean
 df -h "$WORK" "$(dirname "$OUT")" || true
 mv "$ISO" "$OUT"
 ls -lh "$OUT"
+# GitHub refuse les fichiers de plus de 2 Go dans une release : au-delà, l'image est coupée en
+# morceaux à recoller sous Windows avec recoller-nova-os.bat (fourni à côté)
+LIMIT=$((2000 * 1024 * 1024))
+if [ "$(stat -c %s "$OUT")" -gt "$LIMIT" ]; then
+  echo "== Image > 2 Go : découpage en morceaux"
+  split -b 1900M -d -a 1 "$OUT" "$OUT.morceau"
+  rm -f "$OUT"
+  PARTS="$(ls -1 "$OUT".morceau* | xargs -n1 basename | paste -sd+ -)"
+  printf '@echo off\r\ncd /d "%%~dp0"\r\necho Recollage de nova-os.iso...\r\ncopy /b %s nova-os.iso\r\necho Termine : nova-os.iso est pret pour Rufus.\r\npause\r\n' "$PARTS" > "$(dirname "$OUT")/recoller-nova-os.bat"
+  ls -lh "$(dirname "$OUT")"/nova-os.iso.morceau* "$(dirname "$OUT")/recoller-nova-os.bat"
+fi
 echo "Nova OS est prêt : $OUT"
