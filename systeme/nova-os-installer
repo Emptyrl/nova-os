@@ -1,0 +1,251 @@
+#!/bin/bash
+# Installe Nova OS sur le disque du PC, dans l'espace libre laissé à côté de Windows (ou sur un disque vide).
+# Se lance depuis la clé Nova OS : icône « Installer Nova OS sur le disque » du bureau Linux, ou :
+#   sudo nova-os-installer                      (fenêtres de choix et de confirmation)
+#   sudo nova-os-installer --disque /dev/sda --oui    (sans fenêtre : plus grand espace libre du disque)
+#   sudo nova-os-installer --restaurer-windows  (remet le démarrage d'origine de Windows)
+#
+# Ce que fait l'installation, sans toucher aux partitions existantes :
+#   1. crée deux partitions dans l'espace libre : NOVA_SYSTEME (12 Go) et nova-donnees (le reste) ;
+#   2. copie le système de la clé dans l'emplacement A ;
+#   3. copie tes données de la clé (dossier Nova, réglages, Wi-Fi, Bluetooth) dans nova-donnees ;
+#   4. installe le menu de démarrage (GRUB) : « Nova OS » par défaut, « Windows » juste en dessous.
+#      Le début du disque (MBR) est sauvegardé avant, sur NOVA_SYSTEME.
+set -euo pipefail
+. /usr/local/sbin/nova-os-commun
+
+DISQUE=""
+OUI=""
+GUI=""
+RESTAURER=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --disque) DISQUE="$2"; shift 2 ;;
+    --oui) OUI=1; shift ;;
+    --restaurer-windows) RESTAURER=1; shift ;;
+    *) echo "option inconnue : $1"; exit 2 ;;
+  esac
+done
+[ -z "$OUI" ] && [ -n "${DISPLAY:-}" ] && command -v zenity >/dev/null && GUI=1
+[ "$(id -u)" = 0 ] || { echo "À lancer en administrateur (sudo)."; exit 1; }
+
+TITRE="Installer Nova OS"
+info() { if [ -n "$GUI" ]; then zenity --info --title="$TITRE" --width=480 --text="$1" 2>/dev/null || true; else echo "$1"; fi; }
+stop() {
+  nova_log "installation : $1"
+  if [ -n "$GUI" ]; then zenity --error --title="$TITRE" --width=480 --text="$1" 2>/dev/null || true; else echo "ERREUR $1"; fi
+  exit 1
+}
+trap 'stop "Erreur inattendue à la ligne $LINENO ($BASH_COMMAND). Rien n’a été modifié sur Windows. Le détail est dans /var/log/nova-os/nova-os.log."' ERR
+
+# ---------- remettre le démarrage d'origine (avant de supprimer Nova OS depuis Windows) ----------
+if [ -n "$RESTAURER" ]; then
+  SYS="$(nova_sys_dir)" || stop "Partition $NOVA_SYS_LABEL introuvable."
+  [ -f "$SYS/sauvegarde/mbr-disque.txt" ] || stop "Pas de sauvegarde du démarrage sur $NOVA_SYS_LABEL."
+  D="$(cat "$SYS/sauvegarde/mbr-disque.txt")"
+  [ -b "$D" ] || stop "Disque $D introuvable."
+  if [ -f "$SYS/sauvegarde/mbr-440.bin" ]; then
+    dd if="$SYS/sauvegarde/mbr-440.bin" of="$D" bs=440 count=1 conv=notrunc status=none
+    sync
+    info "Le démarrage d’origine de $D est remis : le PC démarrera directement sur Windows. Tu peux maintenant supprimer les partitions de Nova OS depuis la Gestion des disques de Windows."
+  else
+    efibootmgr 2>/dev/null | sed -n 's/^Boot\([0-9A-F]\{4\}\)\* Nova OS.*/\1/p' | while read -r n; do efibootmgr -b "$n" -B >/dev/null; done
+    info "L’entrée de démarrage « Nova OS » est retirée : le PC démarrera sur Windows."
+  fi
+  nova_log "démarrage d'origine remis sur $D"
+  exit 0
+fi
+
+# ---------- vérifications ----------
+MED="/run/live/medium"
+[ -d "$MED/live" ] || stop "Lance l’installation depuis la clé Nova OS (le système de la clé est introuvable)."
+[ -z "$(nova_slot_demarre)" ] || stop "Nova OS est déjà installé sur ce disque et c’est lui qui tourne. Pour le mettre à jour, passe par Réglages → Système Nova OS."
+[ -z "$(nova_sys_dev)" ] || stop "Une partition $NOVA_SYS_LABEL existe déjà : Nova OS semble déjà installé. Démarre dessus et mets-le à jour depuis les Réglages."
+for c in parted grub-install grub-editenv rsync mkfs.ext4 blkid; do command -v "$c" >/dev/null || stop "Outil manquant dans cette version de Nova OS : $c. Refais la clé avec une image plus récente."; done
+KERNEL="$(ls -1 "$MED"/live/vmlinuz* 2>/dev/null | sort -V | tail -1)"
+INITRD="$(ls -1 "$MED"/live/initrd.img* 2>/dev/null | sort -V | tail -1)"
+SQUASH="$MED/live/filesystem.squashfs"
+[ -f "$KERNEL" ] && [ -f "$INITRD" ] && [ -f "$SQUASH" ] || stop "Fichiers du système introuvables sur la clé ($MED/live)."
+
+# disque de la clé : jamais proposé
+CLE_DEV="$(findmnt -rn -o SOURCE "$MED" | head -1 || true)"
+CLE_DISQUE="/dev/$(lsblk -rno PKNAME "$CLE_DEV" 2>/dev/null | head -1 || true)"
+
+# plus grand espace libre d'un disque : « debut fin taille » en Mio (vide s'il n'y en a pas assez)
+espace_libre() {
+  { parted -s -m "$1" unit MiB print free 2>/dev/null || true; } | awk -F: -v min="$NOVA_TAILLE_MIN_MIB" '
+    $5 ~ /^free/ { s=$2; e=$3; sub("MiB","",s); sub("MiB","",e); s=int(s)+1; e=int(e)-1; if (e-s>best) { best=e-s; bs=s; be=e } }
+    END { if (best>=min) print bs, be, best }'
+}
+
+CANDIDATS=()
+while read -r d; do
+  [ "$d" = "$CLE_DISQUE" ] && continue
+  [ "$(cat "/sys/block/$(basename "$d")/removable" 2>/dev/null)" = "1" ] && continue
+  e="$(espace_libre "$d")"
+  [ -n "$e" ] && CANDIDATS+=("$d")
+done < <(lsblk -dnpo NAME,TYPE | awk '$2=="disk" || (ENVIRON["NOVA_TEST_LOOP"]=="1" && $2=="loop") {print $1}')
+
+if [ -n "$DISQUE" ]; then
+  printf '%s\n' "${CANDIDATS[@]}" | grep -qx "$DISQUE" || stop "Pas assez d’espace libre sur $DISQUE (il faut au moins $((NOVA_TAILLE_MIN_MIB / 1024)) Go non alloués), ou c’est le disque de la clé."
+elif [ ${#CANDIDATS[@]} -eq 0 ]; then
+  stop "Aucun disque n’a au moins $((NOVA_TAILLE_MIN_MIB / 1024)) Go d’espace libre.
+
+Dans Windows : clic droit sur Ordinateur → Gérer → Gestion des disques, clic droit sur C: → « Réduire le volume », puis laisse l’espace « Non alloué ». Redémarre ensuite sur la clé Nova OS et relance l’installation."
+elif [ ${#CANDIDATS[@]} -eq 1 ] || [ -z "$GUI" ]; then
+  DISQUE="${CANDIDATS[0]}"
+else
+  ARGS=()
+  for d in "${CANDIDATS[@]}"; do
+    read -r _ _ t <<<"$(espace_libre "$d")"
+    ARGS+=("$d" "$(lsblk -dno MODEL "$d" | xargs) · $(lsblk -dno SIZE "$d" | xargs)" "$((t / 1024)) Go libres")
+  done
+  DISQUE="$(zenity --list --title="$TITRE" --width=620 --height=300 --text="Sur quel disque installer Nova OS ?" \
+    --column="Disque" --column="Modèle" --column="Espace libre" "${ARGS[@]}" 2>/dev/null)" || exit 0
+  [ -n "$DISQUE" ] || exit 0
+fi
+
+read -r DEB FIN TAILLE <<<"$(espace_libre "$DISQUE")"
+TABLE="$(parted -s -m "$DISQUE" print 2>/dev/null | awk -F: 'NR==2{print $6}')"
+EXISTANTES="$(lsblk -lnpo NAME,SIZE,FSTYPE,LABEL "$DISQUE" | awk 'NR>1' | sed 's/^/   /')"
+MODE="bios"; [ -d /sys/firmware/efi ] && MODE="efi"
+DATA_MIB=$((TAILLE - NOVA_TAILLE_SYSTEME_MIB - 2))
+# Windows sur un disque GPT démarre en UEFI : la clé doit aussi avoir démarré en UEFI
+[ "$TABLE" = "gpt" ] && [ "$MODE" = "bios" ] && stop "Le disque $DISQUE est en GPT (Windows en UEFI), mais la clé a démarré en mode BIOS. Redémarre sur la clé en choisissant l’entrée « UEFI » dans le menu de démarrage du PC (F12), puis relance l’installation."
+
+# ---------- confirmation ----------
+TEXTE="Nova OS va s’installer sur <b>$DISQUE</b> ($(lsblk -dno MODEL "$DISQUE" | xargs), $(lsblk -dno SIZE "$DISQUE" | xargs)), dans les <b>$((TAILLE / 1024)) Go d’espace libre</b> :
+   • $NOVA_SYS_LABEL : $((NOVA_TAILLE_SYSTEME_MIB / 1024)) Go (système, deux versions) ;
+   • $NOVA_DATA_LABEL : $((DATA_MIB / 1024)) Go (tes données, ton dossier Nova, le Wi-Fi).
+
+Les partitions déjà présentes <b>ne sont pas touchées</b> :
+$EXISTANTES
+
+Le menu de démarrage du PC est remplacé par celui de Nova OS (« Nova OS », puis « Windows »). L’ancien est sauvegardé.
+
+Continuer ?"
+if [ -n "$GUI" ]; then
+  zenity --question --title="$TITRE" --width=620 --ok-label="Installer" --cancel-label="Annuler" --text="$TEXTE" 2>/dev/null || exit 0
+  MOT="$(zenity --entry --title="$TITRE" --width=480 --text="Pour confirmer, écris INSTALLER :" 2>/dev/null)" || exit 0
+  [ "$MOT" = "INSTALLER" ] || stop "Installation annulée (mot de confirmation différent)."
+elif [ -z "$OUI" ]; then
+  echo "$TEXTE" | sed 's#</\?b>##g'
+  read -r -p "Écris INSTALLER pour confirmer : " MOT
+  [ "$MOT" = "INSTALLER" ] || { echo "Annulé."; exit 0; }
+fi
+
+# ---------- installation (avec barre de progression) ----------
+nova_log "installation sur $DISQUE ($TABLE, $MODE) : $DEB-$FIN Mio"
+if [ -n "$GUI" ]; then
+  exec 3> >(zenity --progress --title="$TITRE" --width=480 --auto-close --no-cancel --text="Préparation…" 2>/dev/null)
+else
+  exec 3>/dev/null
+fi
+etape() { echo "$1" >&3; echo "# $2" >&3; echo "[$1 %] $2"; nova_log "installation : $2"; }
+
+etape 5 "Création des partitions"
+AVANT="$(lsblk -lnpo NAME "$DISQUE" | sort)"
+S1=$DEB; E1=$((DEB + NOVA_TAILLE_SYSTEME_MIB)); S2=$E1; E2=$FIN
+if [ "$TABLE" = "gpt" ]; then
+  parted -s "$DISQUE" unit MiB mkpart nova-systeme ext4 "$S1" "$E1" mkpart nova-donnees ext4 "$S2" "$E2"
+elif [ "$TABLE" = "msdos" ]; then
+  # MBR : 4 partitions principales au maximum ; au-delà, partition étendue avec des partitions logiques
+  NPRIM="$(parted -s -m "$DISQUE" print | awk -F: 'NR>2 && $1<=4' | wc -l)"
+  EXT="$(sfdisk -d "$DISQUE" 2>/dev/null | grep -Ec 'type= *(5|f|85)\b' || true)"
+  if [ "$EXT" = "0" ] && [ "$NPRIM" -le 2 ]; then
+    parted -s "$DISQUE" unit MiB mkpart primary ext4 "$S1" "$E1" mkpart primary ext4 "$S2" "$E2"
+  elif [ "$EXT" = "0" ] && [ "$NPRIM" -eq 3 ]; then
+    parted -s "$DISQUE" unit MiB mkpart extended "$S1" "$E2" mkpart logical ext4 "$((S1 + 1))" "$E1" mkpart logical ext4 "$((S2 + 1))" "$E2"
+  else
+    # espace libre dans une partition étendue existante
+    parted -s "$DISQUE" unit MiB mkpart logical ext4 "$((S1 + 1))" "$E1" mkpart logical ext4 "$((S2 + 1))" "$E2" ||
+      stop "La table de partitions MBR de $DISQUE n’a plus de place pour deux partitions (4 partitions principales au maximum). Libère l’espace à la fin du disque, ou supprime une partition de récupération inutile."
+  fi
+else
+  stop "Type de table de partitions inconnu sur $DISQUE : $TABLE."
+fi
+partprobe "$DISQUE" 2>/dev/null || true
+udevadm settle || true
+sleep 1
+# les deux nouvelles partitions, dans l'ordre du disque (on ignore la petite partition étendue)
+NOUVELLES=()
+while read -r p; do
+  printf '%s\n' "$AVANT" | grep -qx "$p" && continue
+  [ "$(cat "/sys/class/block/$(basename "$p")/size")" -gt 4096 ] || continue
+  NOUVELLES+=("$(cat "/sys/class/block/$(basename "$p")/start") $p")
+done < <(lsblk -lnpo NAME,TYPE "$DISQUE" | awk '$2=="part"{print $1}')
+mapfile -t NOUVELLES < <(printf '%s\n' "${NOUVELLES[@]}" | sort -n | awk '{print $2}')
+[ ${#NOUVELLES[@]} -eq 2 ] || stop "Les nouvelles partitions sont introuvables après création (trouvées : ${NOUVELLES[*]:-aucune})."
+PSYS="${NOUVELLES[0]}"; PDATA="${NOUVELLES[1]}"
+
+etape 12 "Formatage de $PSYS et $PDATA"
+mkfs.ext4 -q -F -L "$NOVA_SYS_LABEL" "$PSYS"
+mkfs.ext4 -q -F -L "$NOVA_DATA_LABEL" "$PDATA"
+SYS="$NOVA_SYS_MNT"; DATA="/run/nova-donnees"
+mkdir -p "$SYS" "$DATA"
+mount "$PSYS" "$SYS"
+mount "$PDATA" "$DATA"
+trap 'umount "$SYS" "$DATA" 2>/dev/null || true' EXIT
+
+etape 18 "Copie du système (environ 2 Go, quelques minutes)"
+mkdir -p "$SYS/systeme/A" "$SYS/sauvegarde"
+cp "$KERNEL" "$SYS/systeme/A/vmlinuz"
+cp "$INITRD" "$SYS/systeme/A/initrd.img"
+TOTAL="$(stat -c %s "$SQUASH")"
+( dd if="$SQUASH" of="$SYS/systeme/A/filesystem.squashfs" bs=4M status=none ) &
+CP=$!
+while kill -0 "$CP" 2>/dev/null; do
+  sleep 2
+  F="$(stat -c %s "$SYS/systeme/A/filesystem.squashfs" 2>/dev/null || echo 0)"
+  echo "$((18 + F * 52 / TOTAL))" >&3
+done
+wait "$CP"
+nova_version_image >"$SYS/systeme/A/version"
+cmp -s <(head -c 1048576 "$SQUASH") <(head -c 1048576 "$SYS/systeme/A/filesystem.squashfs") || stop "La copie du système est incorrecte."
+
+etape 72 "Copie de tes données (dossier Nova, réglages, Wi-Fi, Bluetooth)"
+cat >"$DATA/persistence.conf" <<'EOF'
+/home bind
+/etc/NetworkManager/system-connections bind
+/var/lib/bluetooth bind
+/var/log/journal bind
+/var/log/nova-os bind
+EOF
+for d in /home /etc/NetworkManager/system-connections /var/lib/bluetooth /var/log/journal /var/log/nova-os; do
+  mkdir -p "$DATA$d"
+  [ -d "${NOVA_TEST_SRCROOT:-}$d" ] && rsync -aHAX --exclude='.cache/' "${NOVA_TEST_SRCROOT:-}$d/" "$DATA$d/" || true
+done
+chmod 700 "$DATA/etc/NetworkManager/system-connections" "$DATA/var/lib/bluetooth" 2>/dev/null || true
+
+etape 85 "Menu de démarrage ($MODE)"
+# sauvegarde du début du disque (code de démarrage Windows et table) avant d'y toucher
+dd if="$DISQUE" of="$SYS/sauvegarde/mbr-440.bin" bs=440 count=1 status=none
+dd if="$DISQUE" of="$SYS/sauvegarde/debut-disque-1Mio.bin" bs=1M count=1 status=none
+echo "$DISQUE" >"$SYS/sauvegarde/mbr-disque.txt"
+if [ "$MODE" = "efi" ]; then
+  rm -f "$SYS/sauvegarde/mbr-440.bin"
+  ESP="$(lsblk -lnpo NAME,PARTTYPE "$DISQUE" | awk 'tolower($2)=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"{print $1; exit}')"
+  [ -n "$ESP" ] || stop "Démarrage UEFI, mais aucune partition système EFI sur $DISQUE."
+  mkdir -p /run/nova-esp
+  mount "$ESP" /run/nova-esp
+  grub-install --target=x86_64-efi --efi-directory=/run/nova-esp --boot-directory="$SYS/boot" --bootloader-id="Nova OS" --recheck
+  umount /run/nova-esp
+else
+  grub-install --target=i386-pc --boot-directory="$SYS/boot" --recheck "$DISQUE"
+fi
+nova_ecrire_grub_cfg "$SYS" "$MODE"
+grub-editenv "$SYS/boot/grub/grubenv" create
+grub-editenv "$SYS/boot/grub/grubenv" set nova_actif=A
+echo "$MODE" >"$SYS/sauvegarde/mode-demarrage.txt"
+
+etape 98 "Vérification"
+sync
+[ -f "$SYS/boot/grub/grub.cfg" ] && [ -f "$SYS/systeme/A/filesystem.squashfs" ] || stop "Installation incomplète."
+nova_log "installation terminée : système $PSYS, données $PDATA, version $(nova_version_image)"
+etape 100 "Terminé"
+exec 3>&-
+sleep 1
+info "Nova OS est installé.
+
+Éteins le PC, retire la clé, puis rallume : le menu propose « Nova OS » (par défaut) et « Windows ».
+Les mises à jour du système se font ensuite dans Nova : Réglages → Système Nova OS."
