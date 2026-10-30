@@ -89,9 +89,19 @@ done < <(lsblk -dnpo NAME,TYPE | awk '$2=="disk" || (ENVIRON["NOVA_TEST_LOOP"]==
 if [ -n "$DISQUE" ]; then
   printf '%s\n' "${CANDIDATS[@]}" | grep -qx "$DISQUE" || stop "Pas assez d’espace libre sur $DISQUE (il faut au moins $((NOVA_TAILLE_MIN_MIB / 1024)) Go non alloués), ou c’est le disque de la clé."
 elif [ ${#CANDIDATS[@]} -eq 0 ]; then
-  stop "Aucun disque n’a au moins $((NOVA_TAILLE_MIN_MIB / 1024)) Go d’espace libre.
+  MSG="Aucun disque n’a au moins $((NOVA_TAILLE_MIN_MIB / 1024)) Go d’espace libre (non alloué).
 
-Dans Windows : clic droit sur Ordinateur → Gérer → Gestion des disques, clic droit sur C: → « Réduire le volume », puis laisse l’espace « Non alloué ». Redémarre ensuite sur la clé Nova OS et relance l’installation."
+Il faut réduire la partition de Windows (la plus grande, en NTFS) :
+  • ici, avec GParted : clic droit sur la partition → Redimensionner/Déplacer, réduis-la par la droite, puis ✔ Appliquer ;
+  • ou dans Windows : Gestion des disques → clic droit sur C: → Réduire le volume.
+Laisse l’espace libéré « non alloué », puis relance l’installation."
+  if [ -n "$GUI" ] && command -v gparted >/dev/null &&
+    zenity --question --title="$TITRE" --width=560 --ok-label="Ouvrir GParted" --cancel-label="Fermer" --text="$MSG" 2>/dev/null; then
+    nova_log "installation : pas assez d'espace libre, ouverture de GParted"
+    gparted >/dev/null 2>&1 || true
+    exec "$0" "$@"
+  fi
+  stop "$MSG"
 elif [ ${#CANDIDATS[@]} -eq 1 ] || [ -z "$GUI" ]; then
   DISQUE="${CANDIDATS[0]}"
 else
