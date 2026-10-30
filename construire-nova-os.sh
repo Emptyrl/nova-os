@@ -10,6 +10,13 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="${WORK:-/tmp/nova-os-build}"
 OUT="${OUT:-$HERE/nova-os.iso}"
+# version du système : numéro de construction GitHub (12, 13…), sinon date de la construction locale
+NOVA_OS_VERSION="${NOVA_OS_VERSION:-local-$(date +%Y%m%d%H%M)}"
+NOVA_OS_DEPOT="${NOVA_OS_DEPOT:-Emptyrl/nova-os}"
+# fichiers du système publiés à côté de l'image, pour les mises à jour d'un Nova OS installé sur disque
+PUBLIE="$HERE/publie"
+# options du noyau communes à la clé et au disque (le disque ajoute l'emplacement A/B et sa persistance)
+NOVA_CMDLINE="quiet splash loglevel=3 noeject noprompt user-default-groups=audio,video,plugdev,netdev,bluetooth,dialout,sudo,input,render,adm,systemd-journal username=nova user-fullname=Nova hostname=nova locales=fr_FR.UTF-8 keyboard-layouts=fr timezone=Europe/Paris"
 [ "$(id -u)" = "0" ] || { echo "À lancer en administrateur (sudo)."; exit 1; }
 # tout est noté dans construction.log, dès la première ligne
 exec > >(tee "$HERE/construction.log") 2>&1
@@ -48,7 +55,7 @@ lb config \
   --iso-publisher "Nova" \
   --iso-volume "NOVA_OS" \
   "${ZSTD[@]}" \
-  --bootappend-live "boot=live components quiet splash loglevel=3 noeject noprompt persistence user-default-groups=audio,video,plugdev,netdev,bluetooth,dialout,sudo,input,render,adm,systemd-journal username=nova user-fullname=Nova hostname=nova locales=fr_FR.UTF-8 keyboard-layouts=fr timezone=Europe/Paris"
+  --bootappend-live "boot=live components persistence $NOVA_CMDLINE"
 
 # ---------- paquets ----------
 # Sans les « recommandés », il faut citer tout ce qui compte : pilotes graphiques (sinon tout est
@@ -75,6 +82,7 @@ firmware-ti-connectivity firmware-intel-sound firmware-intel-graphics firmware-i
 firmware-amd-graphics firmware-nvidia-graphics firmware-bnx2 firmware-bnx2x firmware-netronome
 firmware-qlogic firmware-cavium firmware-myricom firmware-netxen firmware-qcom-soc
 polkitd
+grub-pc-bin grub-efi-amd64-bin grub2-common parted rsync efibootmgr ntfs-3g
 "
 OK=(); MANQUE=()
 for p in $PKGS; do
@@ -219,6 +227,45 @@ cat > "$INC/etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml"
 </channel>
 EOF
 
+# ---------- installation sur disque et mises à jour du système (dossier systeme/) ----------
+mkdir -p "$INC/etc/nova-os" "$INC/usr/local/sbin" "$INC/etc/systemd/system/timers.target.wants"
+echo "$NOVA_OS_VERSION" > "$INC/etc/nova-os/version"
+echo "$NOVA_OS_DEPOT" > "$INC/etc/nova-os/depot"
+echo "components $NOVA_CMDLINE" > "$INC/etc/nova-os/cmdline"
+for f in nova-os-commun nova-os-installer nova-os-maj; do
+  src=""
+  for p in "$HERE/systeme/$f" "$HERE/$f"; do [ -f "$p" ] && { src="$p"; break; }; done
+  [ -n "$src" ] || { echo "Fichier manquant : systeme/$f" >&2; exit 1; }
+  cp "$src" "$INC/usr/local/sbin/$f"
+  chmod 755 "$INC/usr/local/sbin/$f"
+done
+# trois minutes après le démarrage, une nouvelle version qui a tenu devient la version habituelle
+cat > "$INC/etc/systemd/system/nova-os-valider.service" <<'EOF'
+[Unit]
+Description=Nova OS : garder la nouvelle version du système si elle a démarré
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nova-os-maj valider
+EOF
+cat > "$INC/etc/systemd/system/nova-os-valider.timer" <<'EOF'
+[Unit]
+Description=Nova OS : validation de la version du système
+[Timer]
+OnBootSec=3min
+[Install]
+WantedBy=timers.target
+EOF
+ln -sf /etc/systemd/system/nova-os-valider.timer "$INC/etc/systemd/system/timers.target.wants/nova-os-valider.timer"
+cat > "$INC/etc/skel/Desktop/Installer-Nova-OS.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Installer Nova OS sur le disque
+Comment=Installe Nova OS à côté de Windows, dans l'espace libre du disque
+Exec=sh -c 'sudo -n env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" /usr/local/sbin/nova-os-installer'
+Icon=drive-harddisk
+EOF
+chmod +x "$INC/etc/skel/Desktop/Installer-Nova-OS.desktop"
+
 # ---------- étapes exécutées dans l'image pendant la construction ----------
 mkdir -p config/hooks/normal
 cat > config/hooks/normal/0500-nova.hook.chroot <<'EOF'
@@ -279,6 +326,28 @@ lb build
 
 ISO="$(ls -1 "$WORK"/*.iso 2>/dev/null | head -1 || true)"
 [ -n "$ISO" ] || { echo "Échec : pas d'image produite (voir construction.log)"; exit 1; }
+
+# Fichiers du système pour les mises à jour d'un Nova OS installé sur disque : noyau, initrd et système
+# en morceaux de 1,9 Go (limite de 2 Go par fichier sur GitHub), décrits par nova-os-systeme.txt.
+echo "== Fichiers de mise à jour du système"
+rm -rf "$WORK/chroot" "$WORK/cache" 2>/dev/null || true
+rm -rf "$HERE/publie"
+mkdir -p "$PUBLIE"
+LIVE="$WORK/binary/live"
+cp "$(ls -1 "$LIVE"/vmlinuz* | sort -V | tail -1)" "$PUBLIE/vmlinuz"
+cp "$(ls -1 "$LIVE"/initrd.img* | sort -V | tail -1)" "$PUBLIE/initrd.img"
+SQ_SUM="$(sha256sum "$LIVE/filesystem.squashfs" | cut -d' ' -f1)"
+split -b 1900M -d -a 1 "$LIVE/filesystem.squashfs" "$PUBLIE/filesystem.squashfs.part"
+{
+  echo "nova-os $NOVA_OS_VERSION"
+  echo "tag nova-os-$NOVA_OS_VERSION"
+  echo "date $(date -u +%F)"
+  for f in vmlinuz initrd.img $(cd "$PUBLIE" && ls -1 filesystem.squashfs.part* | sort -V); do
+    echo "fichier $f $(stat -c %s "$PUBLIE/$f") $(sha256sum "$PUBLIE/$f" | cut -d' ' -f1)"
+  done
+  echo "somme filesystem.squashfs $SQ_SUM"
+} > "$PUBLIE/nova-os-systeme.txt"
+cat "$PUBLIE/nova-os-systeme.txt"
 # l'image fait plus de 2 Go : on libère d'abord la place prise par la construction
 # (le système de travail, les caches) avant de la déplacer, sinon le disque est plein
 echo "== Rangement de l'image ($(du -h "$ISO" | cut -f1))"
