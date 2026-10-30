@@ -63,10 +63,11 @@ Puis dans Nova, ouvre les Réglages :
 
 Nova OS démarre plus vite depuis le disque, et la clé USB reste libre.
 
-1. **Dans Windows, libère de la place** (20 Go minimum, 40 Go conseillés) :
-   - clic droit sur **Ordinateur** → **Gérer** → **Gestion des disques** ;
-   - clic droit sur **C:** → **Réduire le volume** ;
-   - laisse l'espace en **« Non alloué »** : ne crée pas de partition dedans.
+1. **Libère de la place sur le disque** (20 Go minimum, 40 Go conseillés), d'une de ces deux façons :
+   - **depuis la clé Nova OS** : dans le bureau Linux, ouvre **« Partitions du disque (GParted) »**. Chaque partition y apparaît avec une barre : la partie jaune est l'espace utilisé, la partie blanche l'espace libre. Fais un clic droit sur la grande partition NTFS de Windows → **Redimensionner/Déplacer**, réduis-la **par la droite**, **Redimensionner**, puis **✔ Appliquer**. Avant, éteins Windows normalement, sans le mettre en veille prolongée ;
+   - **depuis Windows** : clic droit sur **Ordinateur** → **Gérer** → **Gestion des disques**, puis clic droit sur **C:** → **Réduire le volume**.
+
+   Dans les deux cas, laisse l'espace en **« non alloué »** : ne crée pas de partition dedans, l'installateur s'en charge.
 2. Démarre sur la clé Nova OS, puis va dans **Réglages → Menu Nova OS → Bureau Linux**.
 3. Double-clique sur **« Installer Nova OS sur le disque »**. Vérifie le résumé, puis écris **INSTALLER** pour confirmer.
 4. À la fin, éteins le PC, retire la clé et rallume. Le menu propose **Nova OS** (par défaut, au bout de 3 secondes) et **Windows**.

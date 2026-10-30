@@ -83,6 +83,7 @@ firmware-amd-graphics firmware-nvidia-graphics firmware-bnx2 firmware-bnx2x firm
 firmware-qlogic firmware-cavium firmware-myricom firmware-netxen firmware-qcom-soc
 polkitd
 grub-pc-bin grub-efi-amd64-bin grub2-common parted rsync efibootmgr ntfs-3g
+gparted exfatprogs mtools
 "
 OK=(); MANQUE=()
 for p in $PKGS; do
@@ -265,6 +266,16 @@ Exec=sh -c 'sudo -n env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" /usr/local/s
 Icon=drive-harddisk
 EOF
 chmod +x "$INC/etc/skel/Desktop/Installer-Nova-OS.desktop"
+# GParted : voir l'espace utilisé et libre de chaque partition, réduire Windows pour faire de la place
+cat > "$INC/etc/skel/Desktop/Partitions.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Partitions du disque (GParted)
+Comment=Voir l'espace utilisé et libre, redimensionner les partitions
+Exec=sh -c 'sudo -n env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" /usr/sbin/gparted'
+Icon=gparted
+EOF
+chmod +x "$INC/etc/skel/Desktop/Partitions.desktop"
 
 # ---------- étapes exécutées dans l'image pendant la construction ----------
 mkdir -p config/hooks/normal
