@@ -19,6 +19,9 @@ jobs:
 
       - name: Construire l'image
         run: bash construire-nova-os.sh
+        env:
+          NOVA_OS_VERSION: ${{ github.run_number }}
+          NOVA_OS_DEPOT: ${{ github.repository }}
 
       - name: Publier nova-os.iso
         uses: softprops/action-gh-release@v2
@@ -30,6 +33,7 @@ jobs:
             nova-os.iso
             nova-os.iso.morceau*
             recoller-nova-os.bat
+            publie/*
 
       - name: Garder le journal en cas d'échec
         if: failure()
