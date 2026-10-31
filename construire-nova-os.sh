@@ -156,6 +156,11 @@ cat > "$INC/etc/sudoers.d/90-nova" <<'EOF'
 nova ALL=(ALL) NOPASSWD: ALL
 EOF
 chmod 440 "$INC/etc/sudoers.d/90-nova"
+# la ligne K de Nova a le droit de passer avant l'écran et la voix (priorité jusqu'à -15)
+mkdir -p "$INC/etc/security/limits.d"
+cat > "$INC/etc/security/limits.d/90-nova.conf" <<'EOF'
+nova  -  nice  -15
+EOF
 
 # Extinction : la clé USB ne doit pas être détachée avant la toute fin, sinon le système ne peut
 # plus lire le programme qui coupe le courant et reste bloqué (« Failed to execute shutdown binary »).
@@ -305,6 +310,10 @@ sed -i 's/^# *fr_FR.UTF-8 UTF-8/fr_FR.UTF-8 UTF-8/' /etc/locale.gen 2>/dev/null 
 locale-gen 2>/dev/null || true
 printf 'LANG=fr_FR.UTF-8\n' > /etc/default/locale
 ldconfig
+# les limites de /etc/security/limits.d doivent aussi s'appliquer à la session ouverte automatiquement
+for f in /etc/pam.d/lightdm-autologin /etc/pam.d/lightdm; do
+  if [ -f "$f" ] && ! grep -q pam_limits "$f"; then echo "session required pam_limits.so" >> "$f"; fi
+done
 # démarrage plus rapide : on n'attend pas le réseau, ni les services inutiles en voiture
 systemctl mask NetworkManager-wait-online.service systemd-networkd-wait-online.service 2>/dev/null || true
 systemctl disable apt-daily.timer apt-daily-upgrade.timer man-db.timer e2scrub_all.timer 2>/dev/null || true
